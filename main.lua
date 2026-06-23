@@ -88,6 +88,10 @@ local skinCursor   = 1   -- cursor en la pantalla de seleccion
 
 local snake, dir, nextDir, food, score, hiScore, state, timer, speed
 local foodTimer = 0
+local countdown = 0          -- segundos restantes de cuenta regresiva
+local resumeAfter = false    -- si la cuenta regresiva vuelve a "playing" tras pausa
+local particles = {}         -- particulas activas al comer
+local shake = 0              -- intensidad actual del screen shake
 local F = {}
 
 local function newFood()
@@ -101,6 +105,59 @@ local function newFood()
         y = math.random(1, ROWS)
     until not occupied[x .. "," .. y]
     return {x = x, y = y}
+end
+
+-- coordenada de celda a pixel (con marco)
+local function cellPx(gx, gy)
+    return BOARD_X + (gx - 1) * CELL, BOARD_Y + (gy - 1) * CELL
+end
+
+-- Genera una explosion de cuadritos brutalistas en (px,py)
+local function spawnParticles(px, py, color)
+    local count = 14
+    for i = 1, count do
+        local angle = math.random() * math.pi * 2
+        local sp = 60 + math.random() * 140    -- velocidad
+        table.insert(particles, {
+            x = px, y = py,
+            vx = math.cos(angle) * sp,
+            vy = math.sin(angle) * sp,
+            life = 0.4 + math.random() * 0.3,   -- duracion
+            maxLife = 0.7,
+            size = 3 + math.random() * 5,        -- cuadrito
+            rot = math.random() * math.pi,
+            vrot = (math.random() - 0.5) * 12,
+            color = color,
+        })
+    end
+end
+
+local function updateParticles(dt)
+    for i = #particles, 1, -1 do
+        local p = particles[i]
+        p.life = p.life - dt
+        if p.life <= 0 then
+            table.remove(particles, i)
+        else
+            p.x = p.x + p.vx * dt
+            p.y = p.y + p.vy * dt
+            p.vx = p.vx * 0.90   -- friccion (frenan rapido = brutalista)
+            p.vy = p.vy * 0.90
+            p.rot = p.rot + p.vrot * dt
+        end
+    end
+end
+
+local function drawParticles()
+    for _, p in ipairs(particles) do
+        local alpha = math.min(1, p.life / 0.3)  -- desvanece al final
+        love.graphics.push()
+        love.graphics.translate(p.x, p.y)
+        love.graphics.rotate(p.rot)
+        love.graphics.setColor(p.color[1], p.color[2], p.color[3], alpha)
+        love.graphics.rectangle("fill", -p.size/2, -p.size/2, p.size, p.size)
+        love.graphics.pop()
+    end
 end
 
 local function reset()
@@ -117,6 +174,9 @@ local function reset()
     timer   = 0
     speed   = 0.13
     food    = newFood()
+    particles = {}
+    shake   = 0
+    -- Arranca directo a jugar (la cuenta regresiva solo aparece al reanudar de pausa)
     state   = "playing"
 end
 
@@ -126,6 +186,7 @@ function love.load()
     math.randomseed(os.time())
 
     F.display  = love.graphics.newFont("fonts/Anton-Regular.ttf", 64)
+    F.huge     = love.graphics.newFont("fonts/Anton-Regular.ttf", 160)
     F.displaySm= love.graphics.newFont("fonts/Anton-Regular.ttf", 40)
     F.heavy    = love.graphics.newFont("fonts/ArchivoBlack-Regular.ttf", 18)
     F.heavySm  = love.graphics.newFont("fonts/ArchivoBlack-Regular.ttf", 13)
@@ -138,6 +199,23 @@ end
 
 function love.update(dt)
     foodTimer = foodTimer + dt
+
+    -- Particulas y screen shake se actualizan siempre
+    updateParticles(dt)
+    if shake > 0 then
+        shake = shake - dt * 18   -- decae rapido
+        if shake < 0 then shake = 0 end
+    end
+
+    -- Cuenta regresiva: descuenta y pasa a jugar al llegar a 0
+    if state == "countdown" then
+        countdown = countdown - dt
+        -- countdown va de 3.0 a -0.5 (el tramo negativo muestra "GO")
+        if countdown <= -0.5 then
+            state = "playing"
+        end
+        return
+    end
 
     if state ~= "playing" then return end
     timer = timer + dt
@@ -154,6 +232,7 @@ function love.update(dt)
 
     if nx < 1 or nx > COLS or ny < 1 or ny > ROWS then
         state = "dead"
+        shake = 1.0
         if score > hiScore then hiScore = score end
         return
     end
@@ -161,6 +240,7 @@ function love.update(dt)
     for i = 1, #snake do
         if snake[i].x == nx and snake[i].y == ny then
             state = "dead"
+            shake = 1.0
             if score > hiScore then hiScore = score end
             return
         end
@@ -170,6 +250,9 @@ function love.update(dt)
 
     if nx == food.x and ny == food.y then
         score = score + 10
+        -- Particulas brutalistas en la posicion de la comida
+        local fpx, fpy = cellPx(food.x, food.y)
+        spawnParticles(fpx + CELL/2, fpy + CELL/2, SKINS[selectedSkin].head)
         -- Aumentar velocidad cada 30 puntos
         if score % 30 == 0 and speed > 0.06 then
             speed = speed - 0.01
@@ -184,10 +267,18 @@ function love.keypressed(key)
     if key == "escape" then love.event.quit() end
 
     if key == "p" then
-        if state == "playing" then state = "paused"
-        elseif state == "paused" then state = "playing" end
+        if state == "playing" then
+            state = "paused"
+        elseif state == "paused" then
+            -- Reanudar con una cuenta regresiva corta
+            countdown = 1.5
+            state = "countdown"
+        end
         return
     end
+
+    -- Durante la cuenta regresiva ignoramos el resto de inputs
+    if state == "countdown" then return end
 
     if state == "paused" then
         if key == "m" then state = "menu" end
@@ -232,11 +323,6 @@ function love.keypressed(key)
     elseif (key == "left"  or key == "a") and dir.x ~= 1  then nextDir = {x=-1, y=0}
     elseif (key == "right" or key == "d") and dir.x ~= -1 then nextDir = {x=1,  y=0}
     end
-end
-
--- coordenada de celda a pixel (con marco)
-local function cellPx(gx, gy)
-    return BOARD_X + (gx - 1) * CELL, BOARD_Y + (gy - 1) * CELL
 end
 
 local function drawCell(gx, gy, r, g, b)
@@ -645,13 +731,76 @@ function love.draw()
         return
     end
 
+    -- Screen shake: desplazamiento aleatorio decreciente
+    local sx, sy = 0, 0
+    if shake > 0 then
+        local mag = shake * 8   -- amplitud maxima en pixeles
+        sx = (math.random() - 0.5) * 2 * mag
+        sy = (math.random() - 0.5) * 2 * mag
+    end
+
+    love.graphics.push()
+    love.graphics.translate(sx, sy)
+
     -- Pantalla de juego unificada: HUD + marco + footer
     drawHUD()
     drawBoardFrame()
     drawGrid()
     drawFood()
     drawSnakeBody()
+    drawParticles()
+
+    love.graphics.pop()
+
     drawFooter()
+
+    -- Cuenta regresiva encima del tablero
+    if state == "countdown" then
+        -- Oscurecer el tablero
+        love.graphics.setColor(0, 0, 0, 0.55)
+        love.graphics.rectangle("fill", BOARD_X - 4, BOARD_Y - 4,
+            CELL * COLS + 8, CELL * ROWS + 8)
+
+        -- Numero (3,2,1) o GO en el tramo final
+        local label
+        if countdown > 0 then
+            label = tostring(math.ceil(countdown))
+        else
+            label = "GO"
+        end
+
+        -- Animacion de "pop": grande al inicio de cada numero, se asienta
+        local frac = countdown - math.floor(countdown)  -- 0..1
+        local scale = 0.85 + 0.15 * frac
+
+        local cx = WIDTH / 2
+        local cy = BOARD_Y + (CELL * ROWS) / 2
+
+        love.graphics.setFont(F.huge)
+        local tw = F.huge:getWidth(label)
+        local th = F.huge:getHeight()
+
+        love.graphics.push()
+        love.graphics.translate(cx, cy)
+        love.graphics.scale(scale, scale)
+
+        -- Sombra/borde negro grueso (brutalista) dibujando el texto desplazado
+        love.graphics.setColor(B.black)
+        for _, off in ipairs({{-3,-3},{3,-3},{-3,3},{3,3}}) do
+            love.graphics.print(label, -tw/2 + off[1], -th/2 + off[2])
+        end
+        -- Texto del color de la skin seleccionada
+        love.graphics.setColor(SKINS[selectedSkin].head)
+        love.graphics.print(label, -tw/2, -th/2)
+        love.graphics.pop()
+
+        -- Etiqueta inferior (solo durante 3,2,1)
+        if countdown > 0 then
+            love.graphics.setFont(F.heavySm)
+            love.graphics.setColor(B.paper)
+            love.graphics.printf("GET READY", 0, cy + 90, WIDTH, "center")
+        end
+    end
 
     if state == "paused" then
         drawOverlay("PAUSED", {
