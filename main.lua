@@ -4,8 +4,8 @@
 local CELL = 20
 local COLS = 30
 local ROWS = 25
-local HUD  = 40
-local MARGIN = 14                       -- marco brutalista alrededor del tablero
+local HUD  = 52
+local MARGIN = 14                       -- brutalist frame around the board
 local BOARD_X = MARGIN
 local BOARD_Y = HUD + MARGIN
 local WIDTH  = CELL * COLS + MARGIN * 2
@@ -129,7 +129,13 @@ function love.keypressed(key)
         return
     end
 
-    if state == "menu" or state == "dead" then
+    if state == "dead" then
+        if key == "return" or key == "space" then reset()
+        elseif key == "m" then state = "menu" end
+        return
+    end
+
+    if state == "menu" then
         if key == "return" or key == "space" then reset() end
         return
     end
@@ -161,7 +167,7 @@ local function drawFooter()
     love.graphics.printf("SNAKE.BRUTALISM // LUA + LOVE2D", 0, HEIGHT - 18, WIDTH, "center")
 end
 
--- ===== HUD (compartido) =====
+-- ===== HUD (shared) =====
 local function drawHUD()
     love.graphics.setColor(B.black)
     love.graphics.rectangle("fill", 0, 0, WIDTH, HUD)
@@ -169,43 +175,49 @@ local function drawHUD()
     love.graphics.setLineWidth(3)
     love.graphics.line(0, HUD, WIDTH, HUD)
 
-    -- Bloque rojo decorativo
+    -- Decorative red block
     love.graphics.setColor(B.red)
     love.graphics.rectangle("fill", 0, 0, 50, 8)
 
-    local ty = (HUD - 14) / 2
-    local gap = 8  -- espacio entre etiqueta y valor
+    local labelY = 10  -- label row
+    local valueY = 28  -- value row (below label)
 
-    -- Helper: dibuja "ETIQUETA  valor" y devuelve el ancho total ocupado
-    local function pair(label, value, x)
+    -- Helper: draws a stacked label/value block centered on x
+    -- mode: "left" anchors x at left edge, "center" centers on x, "right" anchors x at right edge
+    local function stack(label, value, x, mode)
+        local lw = F.heavySm:getWidth(label)
+        local vw = F.mono:getWidth(value)
+        local blockW = math.max(lw, vw)
+
+        local bx
+        if mode == "left" then
+            bx = x
+        elseif mode == "right" then
+            bx = x - blockW
+        else -- center
+            bx = x - blockW / 2
+        end
+
+        -- Label (red) centered within the block
         love.graphics.setFont(F.heavySm)
         love.graphics.setColor(B.red)
-        love.graphics.print(label, x, ty)
-        local lw = F.heavySm:getWidth(label)
+        love.graphics.print(label, bx + (blockW - lw) / 2, labelY)
 
+        -- Value (paper) centered within the block
         love.graphics.setFont(F.mono)
         love.graphics.setColor(B.paper)
-        love.graphics.print(value, x + lw + gap, ty - 1)
-        local vw = F.mono:getWidth(value)
-
-        return lw + gap + vw
+        love.graphics.print(value, bx + (blockW - vw) / 2, valueY)
     end
 
-    -- PUNTOS (izquierda, con margen tras el bloque rojo)
-    pair("PUNTOS", tostring(score), 14)
+    -- SCORE (left)
+    stack("SCORE", tostring(score), 14, "left")
 
-    -- VEL (centrado: medimos el bloque completo y lo centramos)
-    local vel = string.format("%.0f", (0.13 - speed) / 0.01 + 1)
-    local velLabelW = F.heavySm:getWidth("VEL")
-    local velValueW = F.mono:getWidth(vel)
-    local velTotalW = velLabelW + gap + velValueW
-    pair("VEL", vel, (WIDTH - velTotalW) / 2)
+    -- SPEED (center)
+    local spd = string.format("%.0f", (0.13 - speed) / 0.01 + 1)
+    stack("SPEED", spd, WIDTH / 2, "center")
 
-    -- RECORD (derecha: medimos y alineamos al borde con margen)
-    local recLabelW = F.heavySm:getWidth("RECORD")
-    local recValueW = F.mono:getWidth(tostring(hiScore))
-    local recTotalW = recLabelW + gap + recValueW
-    pair("RECORD", tostring(hiScore), WIDTH - recTotalW - 14)
+    -- BEST (right)
+    stack("BEST", tostring(hiScore), WIDTH - 14, "right")
 end
 
 -- ===== Marco brutalista del tablero =====
@@ -373,7 +385,7 @@ local function drawOverlay(title, opts)
     love.graphics.setFont(opts.small and F.displaySm or F.display)
     love.graphics.setColor(B.red)
     love.graphics.printf(title, bx + 20, y, bw - 40, "left")
-    y = y + (opts.small and 40 or 60)
+    y = y + (opts.small and 38 or 60)
 
     love.graphics.setColor(B.red)
     love.graphics.setLineWidth(3)
@@ -407,9 +419,9 @@ function love.draw()
             showSnake = true,
             eyebrow = "/HOW TO PLAY",
             controls = {
-                {"ENTER", "JUGAR"},
-                {"WASD",  "MOVER"},
-                {"P",     "PAUSA"},
+                {"ENTER", "PLAY"},
+                {"WASD",  "MOVE"},
+                {"P",     "PAUSE"},
             },
         })
         return
@@ -424,12 +436,12 @@ function love.draw()
     drawFooter()
 
     if state == "paused" then
-        drawOverlay("PAUSA", {
+        drawOverlay("PAUSED", {
             small = true,
             eyebrow = "/PAUSED",
             controls = {
-                {"P", "CONTINUAR"},
-                {"M", "MENU PRINCIPAL"},
+                {"P", "RESUME"},
+                {"M", "MAIN MENU"},
             },
         })
     end
@@ -437,10 +449,11 @@ function love.draw()
     if state == "dead" then
         drawOverlay("GAME OVER", {
             small = true,
-            eyebrow = "/END  PUNTUACION " .. score,
+            eyebrow = "/END  SCORE " .. score,
             showRecord = true,
             controls = {
-                {"ENTER", "REINICIAR"},
+                {"ENTER", "RESTART"},
+                {"M",     "MAIN MENU"},
             },
         })
     end
