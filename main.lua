@@ -21,6 +21,38 @@ local B = {
     darkGray = {0.13, 0.13, 0.13},
 }
 
+-- Colores purple
+local EK = {
+    yellow     = {1.000, 0.792, 0.024},
+    darkPurple = {0.247, 0.098, 0.302},
+    midPurple  = {0.420, 0.000, 0.494},
+}
+
+-- ===== Skins disponibles =====
+-- id, nombre, y funciones de color para cabeza/cuerpo
+local SKINS = {
+    {
+        id   = "brutal",
+        name = "BRUTAL",
+        head = B.red,
+        bodyA = B.paper,
+        bodyB = B.gray,
+        eye  = B.black,
+        border = B.black,
+    },
+    {
+        id   = "purple",
+        name = "PURPLE",
+        head = EK.yellow,
+        bodyA = EK.midPurple,
+        bodyB = EK.darkPurple,
+        eye  = B.black,
+        border = EK.darkPurple,
+    },
+}
+local selectedSkin = 1   -- indice en SKINS
+local skinCursor   = 1   -- cursor en la pantalla de seleccion
+
 local snake, dir, nextDir, food, score, hiScore, state, timer, speed
 local foodTimer = 0
 local F = {}
@@ -136,7 +168,27 @@ function love.keypressed(key)
     end
 
     if state == "menu" then
-        if key == "return" or key == "space" then reset() end
+        if key == "return" or key == "space" then reset()
+        elseif key == "s" then
+            skinCursor = selectedSkin
+            state = "skins"
+        end
+        return
+    end
+
+    if state == "skins" then
+        if key == "left" or key == "a" then
+            skinCursor = skinCursor - 1
+            if skinCursor < 1 then skinCursor = #SKINS end
+        elseif key == "right" or key == "d" then
+            skinCursor = skinCursor + 1
+            if skinCursor > #SKINS then skinCursor = 1 end
+        elseif key == "return" or key == "space" then
+            selectedSkin = skinCursor
+            state = "menu"
+        elseif key == "m" then
+            state = "menu"
+        end
         return
     end
 
@@ -273,44 +325,72 @@ local function drawSnakeS(cx, cy)
     love.graphics.rectangle("fill", hx + S - 5, hy + 3, 3, 3)
 end
 
--- ===== Serpiente brutalista (diseno propio) =====
--- Cabeza: bloque rojo solido con ojo negro cuadrado y "lengua" roja
--- Cuerpo: bloques papel con barra negra (efecto raya brutalista)
+-- ===== Serpiente brutalista (usa skin seleccionada) =====
 local function drawSnakeBody()
-    local n = #snake
+    local sk = SKINS[selectedSkin]
     for i, seg in ipairs(snake) do
         local px, py = cellPx(seg.x, seg.y)
         if i == 1 then
-            -- CABEZA roja solida
-            love.graphics.setColor(B.red)
+            -- CABEZA color principal de la skin
+            love.graphics.setColor(sk.head)
             love.graphics.rectangle("fill", px + 1, py + 1, CELL - 2, CELL - 2)
-            -- borde interno negro (look brutalista)
-            love.graphics.setColor(B.black)
+            -- borde interno (look brutalista)
+            love.graphics.setColor(sk.border)
             love.graphics.setLineWidth(2)
             love.graphics.rectangle("line", px + 3, py + 3, CELL - 6, CELL - 6)
-            -- Ojo cuadrado negro segun direccion
-            love.graphics.setColor(B.black)
+            -- Ojo cuadrado segun direccion
+            love.graphics.setColor(sk.eye)
             local e = 4
             local ex, ey = px + CELL/2 - e/2, py + CELL/2 - e/2
             ex = ex + dir.x * 4
             ey = ey + dir.y * 4
             love.graphics.rectangle("fill", ex, ey, e, e)
         else
-            -- CUERPO: alterna papel/gris para efecto franja brutalista
+            -- CUERPO: alterna los dos colores de la skin (efecto franja)
             if i % 2 == 0 then
-                love.graphics.setColor(B.paper)
+                love.graphics.setColor(sk.bodyA)
             else
-                love.graphics.setColor(B.gray)
+                love.graphics.setColor(sk.bodyB)
             end
             love.graphics.rectangle("fill", px + 1, py + 1, CELL - 2, CELL - 2)
-            -- barra negra central (cebra brutalista)
-            love.graphics.setColor(B.black)
+            -- barra central de borde (cebra brutalista)
+            love.graphics.setColor(sk.border)
             if dir and i == 2 and (dir.x ~= 0) then
                 love.graphics.rectangle("fill", px + 1, py + CELL/2 - 1, CELL - 2, 3)
             else
-                -- barra perpendicular segun posicion (simple: horizontal)
                 love.graphics.rectangle("fill", px + CELL/2 - 1, py + 1, 3, CELL - 2)
             end
+        end
+    end
+end
+
+-- ===== Dibuja una serpiente de muestra (para la pantalla de skins) =====
+-- Dibuja horizontalmente 5 segmentos a partir de (x,y) con tamano cell
+local function drawSkinPreview(skin, x, y, cell)
+    local segs = 5
+    -- Dibujamos de cola (izq) a cabeza (der)
+    for i = 1, segs do
+        local px = x + (i - 1) * cell
+        local isHead = (i == segs)
+        if isHead then
+            love.graphics.setColor(skin.head)
+            love.graphics.rectangle("fill", px + 1, y + 1, cell - 2, cell - 2)
+            love.graphics.setColor(skin.border)
+            love.graphics.setLineWidth(2)
+            love.graphics.rectangle("line", px + 3, y + 3, cell - 6, cell - 6)
+            -- ojo mirando a la derecha
+            love.graphics.setColor(skin.eye)
+            local e = 4
+            love.graphics.rectangle("fill", px + cell/2 - e/2 + 4, y + cell/2 - e/2, e, e)
+        else
+            if i % 2 == 0 then
+                love.graphics.setColor(skin.bodyA)
+            else
+                love.graphics.setColor(skin.bodyB)
+            end
+            love.graphics.rectangle("fill", px + 1, y + 1, cell - 2, cell - 2)
+            love.graphics.setColor(skin.border)
+            love.graphics.rectangle("fill", px + cell/2 - 1, y + 1, 3, cell - 2)
         end
     end
 end
@@ -410,6 +490,105 @@ local function drawOverlay(title, opts)
     drawFooter()
 end
 
+-- ===== Pantalla de seleccion de skin =====
+function drawSkinScreen()
+    -- Fondo papel
+    love.graphics.setColor(B.paper[1], B.paper[2], B.paper[3], 0.96)
+    love.graphics.rectangle("fill", 0, 0, WIDTH, HEIGHT)
+    -- Bloque rojo decorativo
+    love.graphics.setColor(B.red)
+    love.graphics.rectangle("fill", 0, 0, 60, 12)
+
+    local bw = 460
+    local bh = 360
+    local bx = (WIDTH - bw) / 2
+    local by = (HEIGHT - bh) / 2
+
+    -- Caja negra con borde rojo
+    love.graphics.setColor(B.black)
+    love.graphics.rectangle("fill", bx, by, bw, bh)
+    love.graphics.setColor(B.red)
+    love.graphics.setLineWidth(5)
+    love.graphics.rectangle("line", bx, by, bw, bh)
+
+    -- Eyebrow + titulo
+    love.graphics.setFont(F.heavySm)
+    love.graphics.setColor(B.red)
+    love.graphics.printf("/CHOOSE YOUR SNAKE", bx + 24, by + 20, bw - 48, "left")
+
+    love.graphics.setFont(F.displaySm)
+    love.graphics.setColor(B.red)
+    love.graphics.printf("SKINS", bx + 20, by + 42, bw - 40, "left")
+
+    love.graphics.setColor(B.red)
+    love.graphics.setLineWidth(3)
+    love.graphics.line(bx + 24, by + 80, bx + bw - 24, by + 80)
+
+    -- Tarjeta de la skin actual (cursor)
+    local skin = SKINS[skinCursor]
+    local cardX = bx + 40
+    local cardY = by + 115
+    local cardW = bw - 80
+    local cardH = 130
+
+    -- Marco de la tarjeta
+    love.graphics.setColor(0.10, 0.10, 0.10)
+    love.graphics.rectangle("fill", cardX, cardY, cardW, cardH)
+    love.graphics.setColor(B.red)
+    love.graphics.setLineWidth(3)
+    love.graphics.rectangle("line", cardX, cardY, cardW, cardH)
+
+    -- Nombre de la skin
+    love.graphics.setFont(F.heavy)
+    love.graphics.setColor(B.paper)
+    love.graphics.printf(skin.name, cardX, cardY + 16, cardW, "center")
+
+    -- Etiqueta SELECTED si es la activa
+    if skinCursor == selectedSkin then
+        love.graphics.setFont(F.monoSm)
+        love.graphics.setColor(B.red)
+        love.graphics.printf("[ SELECTED ]", cardX, cardY + 44, cardW, "center")
+    end
+
+    -- Preview de la serpiente centrado
+    local pCell = 22
+    local pTotalW = pCell * 5
+    drawSkinPreview(skin, cardX + (cardW - pTotalW) / 2, cardY + 72, pCell)
+
+    -- Flechas de navegacion < > (centradas verticalmente en la tarjeta)
+    love.graphics.setFont(F.display)
+    local arrowH = F.display:getHeight()
+    local arrowY = cardY + (cardH - arrowH) / 2
+    love.graphics.setColor(B.red)
+    love.graphics.printf("<", bx + 10, arrowY, 30, "center")
+    love.graphics.printf(">", bx + bw - 40, arrowY, 30, "center")
+
+    -- Indicador de pagina (1 / 2)
+    love.graphics.setFont(F.monoSm)
+    love.graphics.setColor(B.gray)
+    love.graphics.printf(skinCursor .. " / " .. #SKINS, bx, cardY + cardH + 12, bw, "center")
+
+    -- Controles abajo
+    love.graphics.setFont(F.mono)
+    local cy2 = by + bh - 50
+    love.graphics.setColor(B.red)
+    love.graphics.print("A/D", bx + 28, cy2)
+    love.graphics.setColor(B.paper)
+    love.graphics.print("BROWSE", bx + 90, cy2)
+
+    love.graphics.setColor(B.red)
+    love.graphics.print("ENTER", bx + 240, cy2)
+    love.graphics.setColor(B.paper)
+    love.graphics.print("SELECT", bx + 320, cy2)
+
+    love.graphics.setColor(B.red)
+    love.graphics.print("M", bx + 28, cy2 + 24)
+    love.graphics.setColor(B.paper)
+    love.graphics.print("BACK", bx + 90, cy2 + 24)
+
+    drawFooter()
+end
+
 function love.draw()
     love.graphics.setBackgroundColor(B.black)
     love.graphics.clear(B.black)
@@ -420,10 +599,16 @@ function love.draw()
             eyebrow = "/HOW TO PLAY",
             controls = {
                 {"ENTER", "PLAY"},
+                {"S",     "SKIN"},
                 {"WASD",  "MOVE"},
                 {"P",     "PAUSE"},
             },
         })
+        return
+    end
+
+    if state == "skins" then
+        drawSkinScreen()
         return
     end
 
