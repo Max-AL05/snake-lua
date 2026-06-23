@@ -21,15 +21,30 @@ local B = {
     darkGray = {0.13, 0.13, 0.13},
 }
 
--- Colores purple
+-- Colores Purple (ex-Ekans)
 local EK = {
     yellow     = {1.000, 0.792, 0.024},
     darkPurple = {0.247, 0.098, 0.302},
     midPurple  = {0.420, 0.000, 0.494},
 }
 
+-- Colores estilo piton de jungla (verde oliva + ambar)
+local JG = {
+    amber      = {0.86, 0.62, 0.20},   -- cabeza ambar
+    olive      = {0.36, 0.45, 0.22},   -- verde oliva
+    darkGreen  = {0.18, 0.28, 0.14},   -- verde oscuro
+    eye        = {0.95, 0.78, 0.10},   -- ojo amarillo hipnotico
+}
+
+-- Colores Quetzalcoatl (serpiente emplumada: esmeralda, oro, turquesa)
+local QZ = {
+    emerald    = {0.06, 0.58, 0.40},   -- verde quetzal
+    gold       = {0.95, 0.74, 0.16},   -- oro
+    teal       = {0.10, 0.42, 0.45},   -- turquesa profundo
+    crimson    = {0.78, 0.16, 0.20},   -- detalle rojo
+}
+
 -- ===== Skins disponibles =====
--- id, nombre, y funciones de color para cabeza/cuerpo
 local SKINS = {
     {
         id   = "brutal",
@@ -48,6 +63,24 @@ local SKINS = {
         bodyB = EK.darkPurple,
         eye  = B.black,
         border = EK.darkPurple,
+    },
+    {
+        id   = "jungle",
+        name = "JUNGLE",
+        head = JG.amber,
+        bodyA = JG.olive,
+        bodyB = JG.darkGreen,
+        eye  = JG.eye,
+        border = JG.darkGreen,
+    },
+    {
+        id   = "quetzal",
+        name = "QUETZAL",
+        head = QZ.gold,
+        bodyA = QZ.emerald,
+        bodyB = QZ.teal,
+        eye  = QZ.crimson,
+        border = QZ.gold,
     },
 }
 local selectedSkin = 1   -- indice en SKINS
