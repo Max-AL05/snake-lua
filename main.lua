@@ -86,13 +86,40 @@ local SKINS = {
 local selectedSkin = 1   -- indice en SKINS
 local skinCursor   = 1   -- cursor en la pantalla de seleccion
 
+-- ===== Modos de juego =====
+local MODES = {
+    { id = "classic", name = "CLASSIC",  desc = "WALLS KILL YOU" },
+    { id = "nowalls", name = "NO WALLS", desc = "WRAP AROUND EDGES" },
+}
+local gameMode  = "classic"  -- modo activo
+local modeCursor = 1         -- cursor en pantalla de modos
+
+-- ===== Ajustes de partida =====
+local settings = {
+    speedUp   = true,   -- aumentar velocidad cada 30 puntos
+    powerups  = false,  -- aparicion de power-ups
+    special   = false,  -- aparicion de comida especial
+}
+local configCursor = 1       -- 1=speedUp, 2=powerups, 3=special, 4=START
+
 local snake, dir, nextDir, food, score, hiScore, state, timer, speed
 local foodTimer = 0
 local countdown = 0          -- segundos restantes de cuenta regresiva
 local resumeAfter = false    -- si la cuenta regresiva vuelve a "playing" tras pausa
 local particles = {}         -- particulas activas al comer
 local shake = 0              -- intensidad actual del screen shake
-local F = {}
+-- Power-ups
+local powerup = nil          -- {x, y, life} o nil
+local powerupTimer = 0       -- cuenta hacia la proxima aparicion
+local powerupNext = 10       -- segundos hasta el proximo power-up
+local slowTime = 0           -- segundos restantes del efecto ralentizar
+-- Comida especial
+local special = nil          -- {x, y, life, maxLife} o nil
+local specialTimer = 0       -- cuenta hacia la proxima aparicion
+local specialNext = 12       -- segundos hasta la proxima comida especial
+local SPECIAL_POINTS = 50    -- puntos que otorga
+local F = {}                 -- fuentes
+local SFX = {}               -- efectos de sonido
 
 local function newFood()
     local occupied = {}
@@ -176,6 +203,15 @@ local function reset()
     food    = newFood()
     particles = {}
     shake   = 0
+    -- Reiniciar power-ups
+    powerup = nil
+    powerupTimer = 0
+    powerupNext = 8 + math.random() * 7   -- primer power-up entre 8-15s
+    slowTime = 0
+    -- Reiniciar comida especial
+    special = nil
+    specialTimer = 0
+    specialNext = 10 + math.random() * 8  -- primera entre 10-18s
     -- Arranca directo a jugar (la cuenta regresiva solo aparece al reanudar de pausa)
     state   = "playing"
 end
@@ -193,8 +229,69 @@ function love.load()
     F.mono     = love.graphics.newFont("fonts/SpaceMono-Bold.ttf", 14)
     F.monoSm   = love.graphics.newFont("fonts/SpaceMono-Bold.ttf", 11)
 
+    -- ===== Sintesis de sonidos 8-bit (ondas cuadradas brutalistas) =====
+    -- parts: lista de {f0, f1, wave, vol}; genera un Source estatico
+    local function synth(parts, duration)
+        local rate = 44100
+        local n = math.floor(rate * duration)
+        local data = love.sound.newSoundData(n, rate, 16, 1)
+        for i = 0, n - 1 do
+            local t = i / rate
+            local prog = i / n
+            local sample = 0
+            for _, p in ipairs(parts) do
+                local freq = p.f0 + (p.f1 - p.f0) * prog
+                local phase = freq * t * 2 * math.pi
+                local s
+                if p.wave == "square" then
+                    s = (math.sin(phase) >= 0) and 1 or -1
+                elseif p.wave == "noise" then
+                    s = math.random() * 2 - 1
+                else
+                    s = math.sin(phase)
+                end
+                sample = sample + s * p.vol
+            end
+            -- Envelope: ataque rapido, decaimiento lineal (evita clicks)
+            local attack = 0.01
+            local env
+            if prog < attack then
+                env = prog / attack
+            else
+                env = 1 - (prog - attack) / (1 - attack)
+            end
+            sample = sample * env
+            if sample > 1 then sample = 1 elseif sample < -1 then sample = -1 end
+            data:setSample(i, sample)
+        end
+        return love.audio.newSource(data, "static")
+    end
+
+    -- EAT: blip cuadrado ascendente y brillante
+    SFX.eat    = synth({{f0=440, f1=880, wave="square", vol=0.35}}, 0.10)
+    -- SELECT: beep limpio corto para menus
+    SFX.select = synth({{f0=660, f1=660, wave="square", vol=0.30}}, 0.05)
+    -- DIE: tono grave descendente + ruido (golpe seco)
+    SFX.die    = synth({
+        {f0=300, f1=60, wave="square", vol=0.30},
+        {f0=200, f1=40, wave="noise",  vol=0.20},
+    }, 0.45)
+    -- POWERUP: arpegio ascendente brillante (recoger ralentizar)
+    SFX.power  = synth({
+        {f0=523, f1=1046, wave="square", vol=0.28},
+        {f0=659, f1=1318, wave="sine",   vol=0.18},
+    }, 0.25)
+
     hiScore = 0
     state   = "menu"
+end
+
+-- Reproduce un efecto reiniciandolo (permite repeticion rapida)
+local function playSFX(src)
+    if src then
+        src:stop()
+        src:play()
+    end
 end
 
 function love.update(dt)
@@ -218,8 +315,74 @@ function love.update(dt)
     end
 
     if state ~= "playing" then return end
+
+    -- Efecto ralentizar: descuenta su tiempo
+    if slowTime > 0 then
+        slowTime = slowTime - dt
+        if slowTime < 0 then slowTime = 0 end
+    end
+
+    -- Power-ups: aparicion y expiracion (si estan activados en ajustes)
+    if settings.powerups then
+        if powerup then
+            -- el power-up activo en el tablero tiene vida limitada
+            powerup.life = powerup.life - dt
+            if powerup.life <= 0 then
+                powerup = nil
+                powerupTimer = 0
+                powerupNext = 8 + math.random() * 7
+            end
+        else
+            powerupTimer = powerupTimer + dt
+            if powerupTimer >= powerupNext then
+                -- generar power-up en una celda libre
+                local occupied = {}
+                for _, s in ipairs(snake) do occupied[s.x..","..s.y] = true end
+                occupied[food.x..","..food.y] = true
+                if special then occupied[special.x..","..special.y] = true end
+                local px, py
+                repeat
+                    px = math.random(1, COLS)
+                    py = math.random(1, ROWS)
+                until not occupied[px..","..py]
+                powerup = {x = px, y = py, life = 6.0}  -- visible 6s
+            end
+        end
+    end
+
+    -- Comida especial: aparicion y expiracion (si esta activada)
+    if settings.special then
+        if special then
+            special.life = special.life - dt
+            if special.life <= 0 then
+                special = nil
+                specialTimer = 0
+                specialNext = 10 + math.random() * 8
+            end
+        else
+            specialTimer = specialTimer + dt
+            if specialTimer >= specialNext then
+                local occupied = {}
+                for _, s in ipairs(snake) do occupied[s.x..","..s.y] = true end
+                occupied[food.x..","..food.y] = true
+                if powerup then occupied[powerup.x..","..powerup.y] = true end
+                local px, py
+                repeat
+                    px = math.random(1, COLS)
+                    py = math.random(1, ROWS)
+                until not occupied[px..","..py]
+                local lifeDur = 5.0   -- visible 5s
+                special = {x = px, y = py, life = lifeDur, maxLife = lifeDur}
+            end
+        end
+    end
+
+    -- Velocidad efectiva: el doble de lento si el efecto esta activo
+    local effSpeed = speed
+    if slowTime > 0 then effSpeed = speed * 2 end
+
     timer = timer + dt
-    if timer < speed then return end
+    if timer < effSpeed then return end
     timer = 0
 
     if not (nextDir.x == -dir.x and nextDir.y == -dir.y) then
@@ -230,36 +393,76 @@ function love.update(dt)
     local nx = head.x + dir.x
     local ny = head.y + dir.y
 
+    -- Paredes: en modo classic matan; en nowalls se envuelve al lado opuesto
     if nx < 1 or nx > COLS or ny < 1 or ny > ROWS then
-        state = "dead"
-        shake = 1.0
-        if score > hiScore then hiScore = score end
-        return
+        if gameMode == "nowalls" then
+            if nx < 1 then nx = COLS elseif nx > COLS then nx = 1 end
+            if ny < 1 then ny = ROWS elseif ny > ROWS then ny = 1 end
+        else
+            state = "dead"
+            shake = 1.0
+            playSFX(SFX.die)
+            if score > hiScore then hiScore = score end
+            return
+        end
     end
 
     for i = 1, #snake do
         if snake[i].x == nx and snake[i].y == ny then
             state = "dead"
             shake = 1.0
+            playSFX(SFX.die)
             if score > hiScore then hiScore = score end
             return
         end
     end
 
     table.insert(snake, 1, {x = nx, y = ny})
+    local grew = false   -- si la serpiente crecio este turno (no quitar cola)
+
+    -- Recoger power-up (ralentizar tiempo)
+    if powerup and nx == powerup.x and ny == powerup.y then
+        slowTime = 5.0   -- 5 segundos de tiempo lento
+        playSFX(SFX.power)
+        local ppx, ppy = cellPx(powerup.x, powerup.y)
+        spawnParticles(ppx + CELL/2, ppy + CELL/2, {0.3, 0.7, 1.0})  -- particulas azules
+        powerup = nil
+        powerupTimer = 0
+        powerupNext = 8 + math.random() * 7
+    end
+
+    -- Recoger comida especial (mas puntos, hace crecer)
+    if special and nx == special.x and ny == special.y then
+        score = score + SPECIAL_POINTS
+        grew = true
+        playSFX(SFX.power)
+        local spx, spy = cellPx(special.x, special.y)
+        spawnParticles(spx + CELL/2, spy + CELL/2, {1.0, 0.79, 0.05})  -- particulas doradas
+        special = nil
+        specialTimer = 0
+        specialNext = 10 + math.random() * 8
+        -- Tambien puede subir velocidad si toca multiplo de 30
+        if settings.speedUp and score % 30 == 0 and speed > 0.06 then
+            speed = speed - 0.01
+        end
+    end
 
     if nx == food.x and ny == food.y then
         score = score + 10
+        grew = true
+        playSFX(SFX.eat)
         -- Particulas brutalistas en la posicion de la comida
         local fpx, fpy = cellPx(food.x, food.y)
         spawnParticles(fpx + CELL/2, fpy + CELL/2, SKINS[selectedSkin].head)
-        -- Aumentar velocidad cada 30 puntos
-        if score % 30 == 0 and speed > 0.06 then
+        -- Aumentar velocidad cada 30 puntos (si el ajuste esta activo)
+        if settings.speedUp and score % 30 == 0 and speed > 0.06 then
             speed = speed - 0.01
         end
         food = newFood()
-    else
-        table.remove(snake)
+    end
+
+    if not grew then
+        table.remove(snake)   -- mover: quitar cola si no crecio
     end
 end
 
@@ -269,10 +472,12 @@ function love.keypressed(key)
     if key == "p" then
         if state == "playing" then
             state = "paused"
+            playSFX(SFX.select)
         elseif state == "paused" then
             -- Reanudar con una cuenta regresiva corta
             countdown = 1.5
             state = "countdown"
+            playSFX(SFX.select)
         end
         return
     end
@@ -281,21 +486,102 @@ function love.keypressed(key)
     if state == "countdown" then return end
 
     if state == "paused" then
-        if key == "m" then state = "menu" end
+        if key == "m" then
+            state = "menu"
+            playSFX(SFX.select)
+        end
         return
     end
 
     if state == "dead" then
-        if key == "return" or key == "space" then reset()
-        elseif key == "m" then state = "menu" end
+        if key == "return" or key == "space" then
+            playSFX(SFX.select)
+            reset()
+        elseif key == "m" then
+            state = "menu"
+            playSFX(SFX.select)
+        end
         return
     end
 
     if state == "menu" then
-        if key == "return" or key == "space" then reset()
+        if key == "return" or key == "space" then
+            playSFX(SFX.select)
+            reset()
+        elseif key == "g" then
+            modeCursor = 1
+            for i, m in ipairs(MODES) do
+                if m.id == gameMode then modeCursor = i end
+            end
+            state = "modes"
+            playSFX(SFX.select)
         elseif key == "s" then
             skinCursor = selectedSkin
             state = "skins"
+            playSFX(SFX.select)
+        end
+        return
+    end
+
+    if state == "modes" then
+        if key == "left" or key == "a" then
+            modeCursor = modeCursor - 1
+            if modeCursor < 1 then modeCursor = #MODES end
+            playSFX(SFX.select)
+        elseif key == "right" or key == "d" then
+            modeCursor = modeCursor + 1
+            if modeCursor > #MODES then modeCursor = 1 end
+            playSFX(SFX.select)
+        elseif key == "return" or key == "space" then
+            gameMode = MODES[modeCursor].id
+            configCursor = 1
+            state = "config"
+            playSFX(SFX.select)
+        elseif key == "m" then
+            state = "menu"
+            playSFX(SFX.select)
+        end
+        return
+    end
+
+    if state == "config" then
+        if key == "up" or key == "w" then
+            configCursor = configCursor - 1
+            if configCursor < 1 then configCursor = 4 end
+            playSFX(SFX.select)
+        elseif key == "down" or key == "s" then
+            configCursor = configCursor + 1
+            if configCursor > 4 then configCursor = 1 end
+            playSFX(SFX.select)
+        elseif key == "left" or key == "right" or key == "a" or key == "d" then
+            if configCursor == 1 then
+                settings.speedUp = not settings.speedUp
+                playSFX(SFX.select)
+            elseif configCursor == 2 then
+                settings.powerups = not settings.powerups
+                playSFX(SFX.select)
+            elseif configCursor == 3 then
+                settings.special = not settings.special
+                playSFX(SFX.select)
+            end
+        elseif key == "return" or key == "space" then
+            if configCursor == 1 then
+                settings.speedUp = not settings.speedUp
+                playSFX(SFX.select)
+            elseif configCursor == 2 then
+                settings.powerups = not settings.powerups
+                playSFX(SFX.select)
+            elseif configCursor == 3 then
+                settings.special = not settings.special
+                playSFX(SFX.select)
+            else
+                -- START: arrancar partida
+                playSFX(SFX.select)
+                reset()
+            end
+        elseif key == "m" then
+            state = "modes"
+            playSFX(SFX.select)
         end
         return
     end
@@ -304,14 +590,18 @@ function love.keypressed(key)
         if key == "left" or key == "a" then
             skinCursor = skinCursor - 1
             if skinCursor < 1 then skinCursor = #SKINS end
+            playSFX(SFX.select)
         elseif key == "right" or key == "d" then
             skinCursor = skinCursor + 1
             if skinCursor > #SKINS then skinCursor = 1 end
+            playSFX(SFX.select)
         elseif key == "return" or key == "space" then
             selectedSkin = skinCursor
             state = "menu"
+            playSFX(SFX.select)
         elseif key == "m" then
             state = "menu"
+            playSFX(SFX.select)
         end
         return
     end
@@ -546,6 +836,79 @@ local function drawFood()
     love.graphics.rectangle("line", px + 2, py + 2, CELL - 4, CELL - 4)
 end
 
+-- Dibuja el power-up de ralentizar (reloj/cristal azul) si existe
+local function drawPowerup()
+    if not powerup then return end
+    local px, py = cellPx(powerup.x, powerup.y)
+    local cx, cy = px + CELL/2, py + CELL/2
+    local t = foodTimer
+    local blue = {0.30, 0.70, 1.00}
+
+    -- Parpadeo cuando esta por desaparecer (ultimo 1.5s)
+    local visible = true
+    if powerup.life < 1.5 then
+        visible = (math.floor(t * 8) % 2 == 0)
+    end
+    if not visible then return end
+
+    local pulse = 1 + 0.15 * math.sin(t * 8)
+    local sz = (CELL - 4) * 0.5 * pulse
+
+    -- Bloque azul con borde grueso negro (brutalista)
+    love.graphics.setColor(blue)
+    love.graphics.rectangle("fill", cx - sz, cy - sz, sz * 2, sz * 2)
+    love.graphics.setColor(B.black)
+    love.graphics.setLineWidth(2)
+    love.graphics.rectangle("line", cx - sz, cy - sz, sz * 2, sz * 2)
+
+    -- Simbolo de reloj (manecillas) en negro
+    love.graphics.setLineWidth(2)
+    love.graphics.line(cx, cy, cx, cy - sz * 0.55)
+    love.graphics.line(cx, cy, cx + sz * 0.45, cy)
+end
+
+-- Dibuja la comida especial (estrella dorada) con barra de tiempo descontando
+local function drawSpecial()
+    if not special then return end
+    local px, py = cellPx(special.x, special.y)
+    local cx, cy = px + CELL/2, py + CELL/2
+    local t = foodTimer
+    local gold = {1.0, 0.79, 0.05}
+
+    -- Parpadeo en el ultimo segundo
+    local visible = true
+    if special.life < 1.0 then
+        visible = (math.floor(t * 10) % 2 == 0)
+    end
+
+    if visible then
+        -- Bloque dorado rotando con borde negro grueso (diamante brutalista doble)
+        local pulse = 1 + 0.12 * math.sin(t * 7)
+        local sz = (CELL - 4) * 0.5 * pulse
+        love.graphics.push()
+        love.graphics.translate(cx, cy)
+        love.graphics.rotate(t * 2)
+        love.graphics.setColor(gold)
+        love.graphics.rectangle("fill", -sz, -sz, sz*2, sz*2)
+        love.graphics.setColor(B.black)
+        love.graphics.setLineWidth(2)
+        love.graphics.rectangle("line", -sz*0.5, -sz*0.5, sz, sz)
+        love.graphics.pop()
+    end
+
+    -- Barra de tiempo brutalista justo encima de la celda
+    local frac = special.life / special.maxLife
+    local barW = CELL + 6
+    local barX = px - 3
+    local barY = py - 8
+    -- fondo de la barra
+    love.graphics.setColor(B.black)
+    love.graphics.rectangle("fill", barX, barY, barW, 5)
+    -- relleno dorado descontando
+    love.graphics.setColor(gold)
+    love.graphics.rectangle("fill", barX, barY, barW * frac, 5)
+end
+
 -- ===== Overlay brutalista (menu / pausa / game over) =====
 local function drawOverlay(title, opts)
     opts = opts or {}
@@ -605,6 +968,176 @@ local function drawOverlay(title, opts)
         love.graphics.setColor(B.red)
         love.graphics.printf("RECORD / " .. hiScore, bx + 24, by + bh - 30, bw - 48, "left")
     end
+
+    drawFooter()
+end
+
+-- ===== Pantalla de seleccion de modo =====
+function drawModeScreen()
+    love.graphics.setColor(B.paper[1], B.paper[2], B.paper[3], 0.96)
+    love.graphics.rectangle("fill", 0, 0, WIDTH, HEIGHT)
+    love.graphics.setColor(B.red)
+    love.graphics.rectangle("fill", 0, 0, 60, 12)
+
+    local bw, bh = 460, 320
+    local bx = (WIDTH - bw) / 2
+    local by = (HEIGHT - bh) / 2
+
+    love.graphics.setColor(B.black)
+    love.graphics.rectangle("fill", bx, by, bw, bh)
+    love.graphics.setColor(B.red)
+    love.graphics.setLineWidth(5)
+    love.graphics.rectangle("line", bx, by, bw, bh)
+
+    love.graphics.setFont(F.heavySm)
+    love.graphics.setColor(B.red)
+    love.graphics.printf("/SELECT MODE", bx + 24, by + 20, bw - 48, "left")
+
+    love.graphics.setFont(F.displaySm)
+    love.graphics.setColor(B.red)
+    love.graphics.printf("MODE", bx + 20, by + 42, bw - 40, "left")
+    love.graphics.setColor(B.red)
+    love.graphics.setLineWidth(3)
+    love.graphics.line(bx + 24, by + 80, bx + bw - 24, by + 80)
+
+    -- Tarjeta del modo actual
+    local mode = MODES[modeCursor]
+    local cardX, cardY = bx + 40, by + 110
+    local cardW, cardH = bw - 80, 120
+
+    love.graphics.setColor(0.10, 0.10, 0.10)
+    love.graphics.rectangle("fill", cardX, cardY, cardW, cardH)
+    love.graphics.setColor(B.red)
+    love.graphics.setLineWidth(3)
+    love.graphics.rectangle("line", cardX, cardY, cardW, cardH)
+
+    love.graphics.setFont(F.heavy)
+    love.graphics.setColor(B.paper)
+    love.graphics.printf(mode.name, cardX, cardY + 28, cardW, "center")
+
+    love.graphics.setFont(F.mono)
+    love.graphics.setColor(B.gray)
+    love.graphics.printf(mode.desc, cardX, cardY + 64, cardW, "center")
+
+    if mode.id == gameMode then
+        love.graphics.setFont(F.monoSm)
+        love.graphics.setColor(B.red)
+        love.graphics.printf("[ CURRENT ]", cardX, cardY + 90, cardW, "center")
+    end
+
+    -- Flechas
+    love.graphics.setFont(F.display)
+    local arrowH = F.display:getHeight()
+    local arrowY = cardY + (cardH - arrowH) / 2
+    love.graphics.setColor(B.red)
+    love.graphics.printf("<", bx + 10, arrowY, 30, "center")
+    love.graphics.printf(">", bx + bw - 40, arrowY, 30, "center")
+
+    love.graphics.setFont(F.monoSm)
+    love.graphics.setColor(B.gray)
+    love.graphics.printf(modeCursor .. " / " .. #MODES, bx, cardY + cardH + 12, bw, "center")
+
+    -- Controles
+    love.graphics.setFont(F.mono)
+    local cy2 = by + bh - 44
+    love.graphics.setColor(B.red);  love.graphics.print("A/D", bx + 28, cy2)
+    love.graphics.setColor(B.paper);love.graphics.print("BROWSE", bx + 90, cy2)
+    love.graphics.setColor(B.red);  love.graphics.print("ENTER", bx + 240, cy2)
+    love.graphics.setColor(B.paper);love.graphics.print("NEXT", bx + 320, cy2)
+    love.graphics.setColor(B.red);  love.graphics.print("M", bx + 28, cy2 + 22)
+    love.graphics.setColor(B.paper);love.graphics.print("BACK", bx + 90, cy2 + 22)
+
+    drawFooter()
+end
+
+-- ===== Pantalla de configuracion de partida =====
+function drawConfigScreen()
+    love.graphics.setColor(B.paper[1], B.paper[2], B.paper[3], 0.96)
+    love.graphics.rectangle("fill", 0, 0, WIDTH, HEIGHT)
+    love.graphics.setColor(B.red)
+    love.graphics.rectangle("fill", 0, 0, 60, 12)
+
+    local bw, bh = 460, 390
+    local bx = (WIDTH - bw) / 2
+    local by = (HEIGHT - bh) / 2
+
+    love.graphics.setColor(B.black)
+    love.graphics.rectangle("fill", bx, by, bw, bh)
+    love.graphics.setColor(B.red)
+    love.graphics.setLineWidth(5)
+    love.graphics.rectangle("line", bx, by, bw, bh)
+
+    love.graphics.setFont(F.heavySm)
+    love.graphics.setColor(B.red)
+    love.graphics.printf("/MODE: " .. MODES[modeCursor].name, bx + 24, by + 20, bw - 48, "left")
+
+    love.graphics.setFont(F.displaySm)
+    love.graphics.setColor(B.red)
+    love.graphics.printf("SETUP", bx + 20, by + 42, bw - 40, "left")
+    love.graphics.setColor(B.red)
+    love.graphics.setLineWidth(3)
+    love.graphics.line(bx + 24, by + 80, bx + bw - 24, by + 80)
+
+    -- Filas de ajustes
+    local rowX = bx + 40
+    local rowW = bw - 80
+    local items = {
+        { label = "SPEED UP / 30 PTS", val = settings.speedUp },
+        { label = "POWER-UPS",          val = settings.powerups },
+        { label = "SPECIAL FOOD",       val = settings.special },
+    }
+
+    local function drawRow(y, label, on, selected)
+        -- resaltar fila seleccionada
+        if selected then
+            love.graphics.setColor(B.red)
+            love.graphics.rectangle("fill", rowX - 12, y - 4, 6, 28)
+        end
+        love.graphics.setFont(F.mono)
+        love.graphics.setColor(selected and B.paper or B.gray)
+        love.graphics.print(label, rowX, y)
+
+        -- Pildora ON/OFF a la derecha
+        local boxW = 56
+        local boxX = rowX + rowW - boxW
+        love.graphics.setColor(on and B.red or B.darkGray)
+        love.graphics.rectangle("fill", boxX, y - 2, boxW, 22)
+        love.graphics.setColor(B.paper)
+        love.graphics.setFont(F.monoSm)
+        love.graphics.printf(on and "ON" or "OFF", boxX, y + 2, boxW, "center")
+    end
+
+    drawRow(by + 104, items[1].label, items[1].val, configCursor == 1)
+    drawRow(by + 142, items[2].label, items[2].val, configCursor == 2)
+    drawRow(by + 180, items[3].label, items[3].val, configCursor == 3)
+
+    -- Boton START
+    local startY = by + 224
+    local stW, stH = rowW, 46
+    if configCursor == 4 then
+        love.graphics.setColor(B.red)
+        love.graphics.rectangle("fill", rowX, startY, stW, stH)
+        love.graphics.setColor(B.black)
+    else
+        love.graphics.setColor(B.darkGray)
+        love.graphics.rectangle("fill", rowX, startY, stW, stH)
+        love.graphics.setColor(B.red)
+        love.graphics.setLineWidth(3)
+        love.graphics.rectangle("line", rowX, startY, stW, stH)
+        love.graphics.setColor(B.paper)
+    end
+    love.graphics.setFont(F.heavy)
+    love.graphics.printf("START GAME", rowX, startY + 12, stW, "center")
+
+    -- Controles
+    love.graphics.setFont(F.mono)
+    local cy2 = by + bh - 40
+    love.graphics.setColor(B.red);  love.graphics.print("W/S", bx + 28, cy2)
+    love.graphics.setColor(B.paper);love.graphics.print("MOVE", bx + 90, cy2)
+    love.graphics.setColor(B.red);  love.graphics.print("ENTER", bx + 200, cy2)
+    love.graphics.setColor(B.paper);love.graphics.print("TOGGLE/START", bx + 280, cy2)
+    love.graphics.setColor(B.red);  love.graphics.print("M", bx + 28, cy2 + 20)
+    love.graphics.setColor(B.paper);love.graphics.print("BACK", bx + 90, cy2 + 20)
 
     drawFooter()
 end
@@ -718,8 +1251,8 @@ function love.draw()
             eyebrow = "/HOW TO PLAY",
             controls = {
                 {"ENTER", "PLAY"},
+                {"G",     "GAME MODE"},
                 {"S",     "SKIN"},
-                {"WASD",  "MOVE"},
                 {"P",     "PAUSE"},
             },
         })
@@ -728,6 +1261,16 @@ function love.draw()
 
     if state == "skins" then
         drawSkinScreen()
+        return
+    end
+
+    if state == "modes" then
+        drawModeScreen()
+        return
+    end
+
+    if state == "config" then
+        drawConfigScreen()
         return
     end
 
@@ -747,12 +1290,35 @@ function love.draw()
     drawBoardFrame()
     drawGrid()
     drawFood()
+    drawPowerup()
+    drawSpecial()
     drawSnakeBody()
     drawParticles()
 
     love.graphics.pop()
 
     drawFooter()
+
+    -- Indicador de efecto SLOW activo
+    if (state == "playing" or state == "paused") and slowTime > 0 then
+        local bw2 = 130
+        local bx2 = (WIDTH - bw2) / 2
+        local by2 = BOARD_Y + 6
+        -- barra de tiempo restante
+        local frac = slowTime / 5.0
+        love.graphics.setColor(0.30, 0.70, 1.00, 0.92)
+        love.graphics.rectangle("fill", bx2, by2, bw2, 22)
+        love.graphics.setColor(B.black)
+        love.graphics.setLineWidth(2)
+        love.graphics.rectangle("line", bx2, by2, bw2, 22)
+        -- progreso
+        love.graphics.setColor(0, 0, 0, 0.25)
+        love.graphics.rectangle("fill", bx2, by2, bw2 * (1 - frac), 22)
+        -- texto
+        love.graphics.setFont(F.monoSm)
+        love.graphics.setColor(B.black)
+        love.graphics.printf("SLOW " .. string.format("%.1f", slowTime) .. "S", bx2, by2 + 5, bw2, "center")
+    end
 
     -- Cuenta regresiva encima del tablero
     if state == "countdown" then
