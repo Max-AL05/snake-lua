@@ -88,8 +88,8 @@ local skinCursor   = 1   -- cursor en la pantalla de seleccion
 
 -- ===== Modos de juego =====
 local MODES = {
-    { id = "classic", name = "CLASSIC",  desc = "WALLS KILL YOU" },
-    { id = "nowalls", name = "NO WALLS", desc = "WRAP AROUND EDGES" },
+    { id = "classic",   name = "CLASSIC",   desc = "STANDARD SNAKE" },
+    { id = "obstacles", name = "OBSTACLES", desc = "WALLS APPEAR AS YOU LEVEL UP" },
 }
 local gameMode  = "classic"  -- modo activo
 local modeCursor = 1         -- cursor en pantalla de modos
@@ -99,8 +99,9 @@ local settings = {
     speedUp   = true,   -- aumentar velocidad cada 30 puntos
     powerups  = false,  -- aparicion de power-ups
     special   = false,  -- aparicion de comida especial
+    noWalls   = false,  -- atravesar bordes (wrap-around)
 }
-local configCursor = 1       -- 1=speedUp, 2=powerups, 3=special, 4=START
+local configCursor = 1       -- 1=speedUp, 2=powerups, 3=special, 4=noWalls, 5=START
 
 local snake, dir, nextDir, food, score, hiScore, state, timer, speed
 local foodTimer = 0
@@ -118,6 +119,11 @@ local special = nil          -- {x, y, life, maxLife} o nil
 local specialTimer = 0       -- cuenta hacia la proxima aparicion
 local specialNext = 12       -- segundos hasta la proxima comida especial
 local SPECIAL_POINTS = 50    -- puntos que otorga
+-- Obstaculos (modo OBSTACLES)
+local obstacles = {}         -- lista de {x, y}
+local obstacleSet = {}       -- lookup "x,y" -> true para colisiones rapidas
+local obsLevel = 0           -- nivel actual alcanzado (cada 40 pts sube)
+local OBS_PER_LEVEL = 3      -- obstaculos que aparecen por nivel
 local F = {}                 -- fuentes
 local SFX = {}               -- efectos de sonido
 
@@ -126,12 +132,44 @@ local function newFood()
     for _, s in ipairs(snake) do
         occupied[s.x .. "," .. s.y] = true
     end
+    -- evitar obstaculos
+    for _, o in ipairs(obstacles) do
+        occupied[o.x .. "," .. o.y] = true
+    end
     local x, y
     repeat
         x = math.random(1, COLS)
         y = math.random(1, ROWS)
     until not occupied[x .. "," .. y]
     return {x = x, y = y}
+end
+
+-- Genera 'count' obstaculos nuevos en celdas libres, lejos de la cabeza
+local function spawnObstacles(count)
+    local occupied = {}
+    for _, s in ipairs(snake) do occupied[s.x..","..s.y] = true end
+    for _, o in ipairs(obstacles) do occupied[o.x..","..o.y] = true end
+    if food then occupied[food.x..","..food.y] = true end
+    if powerup then occupied[powerup.x..","..powerup.y] = true end
+    if special then occupied[special.x..","..special.y] = true end
+
+    local head = snake[1]
+    local placed = 0
+    local attempts = 0
+    while placed < count and attempts < 400 do
+        attempts = attempts + 1
+        local x = math.random(2, COLS - 1)   -- no pegados al borde
+        local y = math.random(2, ROWS - 1)
+        local key = x .. "," .. y
+        -- zona segura: no dentro de 4 celdas de la cabeza ni en su fila/columna inmediata
+        local distHead = math.abs(x - head.x) + math.abs(y - head.y)
+        if not occupied[key] and distHead > 4 then
+            occupied[key] = true
+            obstacleSet[key] = true
+            table.insert(obstacles, {x = x, y = y})
+            placed = placed + 1
+        end
+    end
 end
 
 -- coordenada de celda a pixel (con marco)
@@ -212,6 +250,10 @@ local function reset()
     special = nil
     specialTimer = 0
     specialNext = 10 + math.random() * 8  -- primera entre 10-18s
+    -- Reiniciar obstaculos
+    obstacles = {}
+    obstacleSet = {}
+    obsLevel = 0
     -- Arranca directo a jugar (la cuenta regresiva solo aparece al reanudar de pausa)
     state   = "playing"
 end
@@ -340,6 +382,7 @@ function love.update(dt)
                 for _, s in ipairs(snake) do occupied[s.x..","..s.y] = true end
                 occupied[food.x..","..food.y] = true
                 if special then occupied[special.x..","..special.y] = true end
+                for _, o in ipairs(obstacles) do occupied[o.x..","..o.y] = true end
                 local px, py
                 repeat
                     px = math.random(1, COLS)
@@ -366,6 +409,7 @@ function love.update(dt)
                 for _, s in ipairs(snake) do occupied[s.x..","..s.y] = true end
                 occupied[food.x..","..food.y] = true
                 if powerup then occupied[powerup.x..","..powerup.y] = true end
+                for _, o in ipairs(obstacles) do occupied[o.x..","..o.y] = true end
                 local px, py
                 repeat
                     px = math.random(1, COLS)
@@ -393,9 +437,9 @@ function love.update(dt)
     local nx = head.x + dir.x
     local ny = head.y + dir.y
 
-    -- Paredes: en modo classic matan; en nowalls se envuelve al lado opuesto
+    -- Paredes: con noWalls se envuelve al lado opuesto; si no, matan
     if nx < 1 or nx > COLS or ny < 1 or ny > ROWS then
-        if gameMode == "nowalls" then
+        if settings.noWalls then
             if nx < 1 then nx = COLS elseif nx > COLS then nx = 1 end
             if ny < 1 then ny = ROWS elseif ny > ROWS then ny = 1 end
         else
@@ -415,6 +459,15 @@ function love.update(dt)
             if score > hiScore then hiScore = score end
             return
         end
+    end
+
+    -- Colision con obstaculos (modo OBSTACLES)
+    if obstacleSet[nx .. "," .. ny] then
+        state = "dead"
+        shake = 1.0
+        playSFX(SFX.die)
+        if score > hiScore then hiScore = score end
+        return
     end
 
     table.insert(snake, 1, {x = nx, y = ny})
@@ -463,6 +516,18 @@ function love.update(dt)
 
     if not grew then
         table.remove(snake)   -- mover: quitar cola si no crecio
+    end
+
+    -- Modo OBSTACLES: subir de nivel cada 40 puntos genera muros nuevos
+    if gameMode == "obstacles" then
+        local newLevel = math.floor(score / 40)
+        if newLevel > obsLevel then
+            for _ = obsLevel + 1, newLevel do
+                spawnObstacles(OBS_PER_LEVEL)
+            end
+            obsLevel = newLevel
+            playSFX(SFX.select)   -- pequeno aviso al aparecer muros
+        end
     end
 end
 
@@ -547,11 +612,11 @@ function love.keypressed(key)
     if state == "config" then
         if key == "up" or key == "w" then
             configCursor = configCursor - 1
-            if configCursor < 1 then configCursor = 4 end
+            if configCursor < 1 then configCursor = 5 end
             playSFX(SFX.select)
         elseif key == "down" or key == "s" then
             configCursor = configCursor + 1
-            if configCursor > 4 then configCursor = 1 end
+            if configCursor > 5 then configCursor = 1 end
             playSFX(SFX.select)
         elseif key == "left" or key == "right" or key == "a" or key == "d" then
             if configCursor == 1 then
@@ -563,6 +628,9 @@ function love.keypressed(key)
             elseif configCursor == 3 then
                 settings.special = not settings.special
                 playSFX(SFX.select)
+            elseif configCursor == 4 then
+                settings.noWalls = not settings.noWalls
+                playSFX(SFX.select)
             end
         elseif key == "return" or key == "space" then
             if configCursor == 1 then
@@ -573,6 +641,9 @@ function love.keypressed(key)
                 playSFX(SFX.select)
             elseif configCursor == 3 then
                 settings.special = not settings.special
+                playSFX(SFX.select)
+            elseif configCursor == 4 then
+                settings.noWalls = not settings.noWalls
                 playSFX(SFX.select)
             else
                 -- START: arrancar partida
@@ -700,6 +771,24 @@ local function drawGrid()
     for y = 0, ROWS do
         love.graphics.line(BOARD_X, BOARD_Y + y * CELL,
             BOARD_X + COLS * CELL, BOARD_Y + y * CELL)
+    end
+end
+
+-- Dibuja los muros/obstaculos (bloques de peligro brutalistas)
+local function drawObstacles()
+    for _, o in ipairs(obstacles) do
+        local px, py = cellPx(o.x, o.y)
+        -- bloque gris oscuro solido
+        love.graphics.setColor(0.20, 0.20, 0.22)
+        love.graphics.rectangle("fill", px + 1, py + 1, CELL - 2, CELL - 2)
+        -- borde rojo grueso (peligro)
+        love.graphics.setColor(B.red)
+        love.graphics.setLineWidth(2)
+        love.graphics.rectangle("line", px + 2, py + 2, CELL - 4, CELL - 4)
+        -- rayas diagonales de peligro
+        love.graphics.setColor(B.red[1], B.red[2], B.red[3], 0.5)
+        love.graphics.setLineWidth(1)
+        love.graphics.line(px + 4, py + CELL - 4, px + CELL - 4, py + 4)
     end
 end
 
@@ -1057,7 +1146,7 @@ function drawConfigScreen()
     love.graphics.setColor(B.red)
     love.graphics.rectangle("fill", 0, 0, 60, 12)
 
-    local bw, bh = 460, 390
+    local bw, bh = 460, 430
     local bx = (WIDTH - bw) / 2
     local by = (HEIGHT - bh) / 2
 
@@ -1085,6 +1174,7 @@ function drawConfigScreen()
         { label = "SPEED UP / 30 PTS", val = settings.speedUp },
         { label = "POWER-UPS",          val = settings.powerups },
         { label = "SPECIAL FOOD",       val = settings.special },
+        { label = "NO WALLS",           val = settings.noWalls },
     }
 
     local function drawRow(y, label, on, selected)
@@ -1107,14 +1197,15 @@ function drawConfigScreen()
         love.graphics.printf(on and "ON" or "OFF", boxX, y + 2, boxW, "center")
     end
 
-    drawRow(by + 104, items[1].label, items[1].val, configCursor == 1)
-    drawRow(by + 142, items[2].label, items[2].val, configCursor == 2)
-    drawRow(by + 180, items[3].label, items[3].val, configCursor == 3)
+    drawRow(by + 100, items[1].label, items[1].val, configCursor == 1)
+    drawRow(by + 138, items[2].label, items[2].val, configCursor == 2)
+    drawRow(by + 176, items[3].label, items[3].val, configCursor == 3)
+    drawRow(by + 214, items[4].label, items[4].val, configCursor == 4)
 
     -- Boton START
-    local startY = by + 224
+    local startY = by + 258
     local stW, stH = rowW, 46
-    if configCursor == 4 then
+    if configCursor == 5 then
         love.graphics.setColor(B.red)
         love.graphics.rectangle("fill", rowX, startY, stW, stH)
         love.graphics.setColor(B.black)
@@ -1289,6 +1380,7 @@ function love.draw()
     drawHUD()
     drawBoardFrame()
     drawGrid()
+    drawObstacles()
     drawFood()
     drawPowerup()
     drawSpecial()
