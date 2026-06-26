@@ -1,0 +1,9 @@
+# Windows
+Thumbs.db
+desktop.ini
+
+# macOS
+.DS_Store
+
+# LÖVE save files
+*.love
